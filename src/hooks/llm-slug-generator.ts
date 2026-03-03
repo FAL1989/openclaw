@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import type { ClawdbotConfig } from "../config/config.js";
+import { CommandLane } from "../process/lanes.js";
 import {
   resolveDefaultAgentId,
   resolveAgentWorkspaceDir,
@@ -46,7 +47,8 @@ Reply with ONLY the slug, nothing else. Examples: "vendor-pitch", "api-design", 
       agentDir,
       config: params.cfg,
       prompt,
-      timeoutMs: 15_000, // 15 second timeout
+      lane: CommandLane.Cron,
+      timeoutMs: 5_000, // Keep slug generation lightweight; fallback timestamp slug handles failures
       runId: `slug-gen-${Date.now()}`,
     });
 

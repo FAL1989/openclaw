@@ -57,6 +57,8 @@ type ApiKeyInfo = ResolvedProviderAuth;
 // Avoid Anthropic's refusal test token poisoning session transcripts.
 const ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL = "ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL";
 const ANTHROPIC_MAGIC_STRING_REPLACEMENT = "ANTHROPIC MAGIC STRING TRIGGER REFUSAL (redacted)";
+const PROVIDER_RATE_LIMIT_FAST_FAIL_MS = 30_000;
+const providerRateLimitUntilByProvider = new Map<string, number>();
 
 function scrubAnthropicRefusalMagic(prompt: string): string {
   if (!prompt.includes(ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL)) return prompt;
@@ -64,6 +66,31 @@ function scrubAnthropicRefusalMagic(prompt: string): string {
     ANTHROPIC_MAGIC_STRING_TRIGGER_REFUSAL,
     ANTHROPIC_MAGIC_STRING_REPLACEMENT,
   );
+}
+
+function getProviderRateLimitRemainingMs(providerId: string): number {
+  const key = normalizeProviderId(providerId);
+  const until = providerRateLimitUntilByProvider.get(key);
+  if (!until) return 0;
+  const remaining = until - Date.now();
+  if (remaining <= 0) {
+    providerRateLimitUntilByProvider.delete(key);
+    return 0;
+  }
+  return remaining;
+}
+
+function markProviderRateLimited(providerId: string) {
+  const key = normalizeProviderId(providerId);
+  const until = Date.now() + PROVIDER_RATE_LIMIT_FAST_FAIL_MS;
+  const existing = providerRateLimitUntilByProvider.get(key) ?? 0;
+  if (until > existing) {
+    providerRateLimitUntilByProvider.set(key, until);
+  }
+}
+
+export function __resetProviderRateLimitCooldownForTests() {
+  providerRateLimitUntilByProvider.clear();
 }
 
 export async function runEmbeddedPiAgent(
@@ -97,6 +124,24 @@ export async function runEmbeddedPiAgent(
       const fallbackConfigured =
         (params.config?.agents?.defaults?.model?.fallbacks?.length ?? 0) > 0;
       await ensureClawdbotModelsJson(params.config, agentDir);
+
+      if (fallbackConfigured) {
+        const remainingMs = getProviderRateLimitRemainingMs(provider);
+        if (remainingMs > 0) {
+          log.warn(
+            `provider cooldown fast-fail: ${provider}/${modelId} retryInMs=${remainingMs}`,
+          );
+          throw new FailoverError(
+            `Provider temporarily rate-limited. Retry in ${Math.ceil(remainingMs / 1000)}s.`,
+            {
+              reason: "rate_limit",
+              provider,
+              model: modelId,
+              status: 429,
+            },
+          );
+        }
+      }
 
       const { model, error, authStorage, modelRegistry } = resolveModel(
         provider,
@@ -441,6 +486,9 @@ export async function runEmbeddedPiAgent(
               };
             }
             const promptFailoverReason = classifyFailoverReason(errorText);
+            if (promptFailoverReason === "rate_limit") {
+              markProviderRateLimited(provider);
+            }
             if (promptFailoverReason && promptFailoverReason !== "timeout" && lastProfileId) {
               await markAuthProfileFailure({
                 store: authStore,
@@ -524,6 +572,9 @@ export async function runEmbeddedPiAgent(
           const shouldRotate = (!aborted && failoverFailure) || timedOut;
 
           if (shouldRotate) {
+            if (assistantFailoverReason === "rate_limit") {
+              markProviderRateLimited(provider);
+            }
             if (lastProfileId) {
               const reason =
                 timedOut || assistantFailoverReason === "timeout"

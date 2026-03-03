@@ -15,14 +15,18 @@ vi.mock("./pi-embedded-runner/run/attempt.js", () => ({
 }));
 
 let runEmbeddedPiAgent: typeof import("./pi-embedded-runner.js").runEmbeddedPiAgent;
+let resetProviderRateLimitCooldown: typeof import("./pi-embedded-runner.js").__resetProviderRateLimitCooldownForTests =
+  () => {};
 
 beforeAll(async () => {
-  ({ runEmbeddedPiAgent } = await import("./pi-embedded-runner.js"));
+  ({ runEmbeddedPiAgent, __resetProviderRateLimitCooldownForTests: resetProviderRateLimitCooldown } =
+    await import("./pi-embedded-runner.js"));
 });
 
 beforeEach(() => {
   vi.useRealTimers();
   runEmbeddedAttemptMock.mockReset();
+  resetProviderRateLimitCooldown();
 });
 
 const baseUsage = {
@@ -473,6 +477,58 @@ describe("runEmbeddedPiAgent auth profile rotation", () => {
       } else {
         process.env.OPENAI_API_KEY = previousOpenAiKey;
       }
+      await fs.rm(agentDir, { recursive: true, force: true });
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fast-fails repeated provider calls after a rate limit", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-agent-"));
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawdbot-workspace-"));
+    try {
+      await writeAuthStore(agentDir);
+
+      runEmbeddedAttemptMock.mockResolvedValueOnce(
+        makeAttempt({
+          assistantTexts: [],
+          lastAssistant: buildAssistant({
+            stopReason: "error",
+            errorMessage: "API rate limit reached. Please try again later.",
+          }),
+        }),
+      );
+
+      const baseParams = {
+        sessionId: "session:test",
+        sessionKey: "agent:test:provider-rate-limit-fast-fail",
+        sessionFile: path.join(workspaceDir, "session.jsonl"),
+        workspaceDir,
+        agentDir,
+        config: makeConfig({ fallbacks: ["anthropic/mock-fallback"] }),
+        prompt: "hello",
+        provider: "openai",
+        model: "mock-1",
+        authProfileId: "openai:p1",
+        authProfileIdSource: "user" as const,
+        timeoutMs: 5_000,
+      };
+
+      await expect(
+        runEmbeddedPiAgent({
+          ...baseParams,
+          runId: "run:first-rate-limit",
+        }),
+      ).rejects.toMatchObject({ name: "FailoverError", reason: "rate_limit" });
+
+      await expect(
+        runEmbeddedPiAgent({
+          ...baseParams,
+          runId: "run:fast-fail",
+        }),
+      ).rejects.toMatchObject({ name: "FailoverError", reason: "rate_limit" });
+
+      expect(runEmbeddedAttemptMock).toHaveBeenCalledTimes(1);
+    } finally {
       await fs.rm(agentDir, { recursive: true, force: true });
       await fs.rm(workspaceDir, { recursive: true, force: true });
     }
