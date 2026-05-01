@@ -370,6 +370,59 @@ describe("runCodexAppServerAttempt", () => {
     expect(onTimeout).toHaveBeenCalledTimes(1);
   });
 
+  it("honors explicit dynamic tool timeouts above the default", async () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    const response = __testing.handleDynamicToolCallWithTimeout({
+      call: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "call-image",
+        namespace: null,
+        tool: "image_generate",
+        arguments: { prompt: "test", timeoutMs: 120_000 },
+      },
+      toolBridge: {
+        handleToolCall: vi.fn(() => new Promise<never>(() => undefined)),
+      },
+      signal: new AbortController().signal,
+      timeoutMs: __testing.resolveCodexDynamicToolTimeoutMs({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "call-image",
+        namespace: null,
+        tool: "image_generate",
+        arguments: { prompt: "test", timeoutMs: 120_000 },
+      }),
+      onTimeout,
+    });
+
+    await vi.advanceTimersByTimeAsync(__testing.CODEX_DYNAMIC_TOOL_TIMEOUT_MS);
+    expect(onTimeout).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    await expect(response).resolves.toEqual({
+      success: false,
+      contentItems: [
+        { type: "inputText", text: "OpenClaw dynamic tool call timed out after 120000ms." },
+      ],
+    });
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the default dynamic tool timeout when no explicit timeout is requested", () => {
+    expect(
+      __testing.resolveCodexDynamicToolTimeoutMs({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "call-default",
+        namespace: null,
+        tool: "message",
+        arguments: { text: "hello" },
+      }),
+    ).toBe(__testing.CODEX_DYNAMIC_TOOL_TIMEOUT_MS);
+  });
+
   it("releases the session when Codex never completes after a dynamic tool response", async () => {
     let handleRequest:
       | ((request: { id: string; method: string; params?: unknown }) => Promise<unknown>)

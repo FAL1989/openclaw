@@ -365,6 +365,74 @@ describe("CodexAppServerClient", () => {
     );
   });
 
+  it("honors explicit dynamic tool server request timeouts above the default", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
+    const harness = createClientHarness();
+    clients.push(harness.client);
+    harness.client.addRequestHandler((request) => {
+      if (request.method === "item/tool/call") {
+        return new Promise<never>(() => undefined);
+      }
+      return undefined;
+    });
+
+    harness.send({
+      id: "srv-image-timeout",
+      method: "item/tool/call",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        callId: "call-image",
+        namespace: null,
+        tool: "image_generate",
+        arguments: { prompt: "test", timeoutMs: 120_000 },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(__testing.CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS);
+    expect(harness.writes).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(90_000);
+    await vi.waitFor(() => expect(harness.writes.length).toBe(1));
+
+    expect(JSON.parse(harness.writes[0] ?? "{}")).toEqual({
+      id: "srv-image-timeout",
+      result: {
+        success: false,
+        contentItems: [
+          {
+            type: "inputText",
+            text: "OpenClaw dynamic tool call timed out after 120000ms before sending a response to Codex.",
+          },
+        ],
+      },
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "codex app-server server request timed out",
+      expect.objectContaining({
+        id: "srv-image-timeout",
+        method: "item/tool/call",
+        timeoutMs: 120_000,
+      }),
+    );
+  });
+
+  it("uses the default dynamic tool server request timeout when none is requested", () => {
+    expect(
+      __testing.resolveServerRequestTimeoutMs({
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "call-default",
+          namespace: null,
+          tool: "message",
+          arguments: { text: "hello" },
+        },
+      }),
+    ).toBe(__testing.CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS);
+  });
+
   it("fails closed for unhandled native app-server approvals", async () => {
     const harness = createClientHarness();
     clients.push(harness.client);

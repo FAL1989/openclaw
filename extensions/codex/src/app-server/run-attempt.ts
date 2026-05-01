@@ -86,6 +86,7 @@ import { createCodexUserInputBridge } from "./user-input-bridge.js";
 import { filterToolsForVisionInputs } from "./vision-tools.js";
 
 const CODEX_DYNAMIC_TOOL_TIMEOUT_MS = 30_000;
+const CODEX_DYNAMIC_TOOL_MAX_TIMEOUT_MS = 300_000;
 const CODEX_TURN_COMPLETION_IDLE_TIMEOUT_MS = 60_000;
 const CODEX_STEER_ALL_DEBOUNCE_MS = 500;
 
@@ -663,14 +664,15 @@ export async function runCodexAppServerAttempt(
         call,
         toolBridge,
         signal: runAbortController.signal,
-        timeoutMs: CODEX_DYNAMIC_TOOL_TIMEOUT_MS,
+        timeoutMs: resolveCodexDynamicToolTimeoutMs(call),
         onTimeout: () => {
+          const timeoutMs = resolveCodexDynamicToolTimeoutMs(call);
           trajectoryRecorder?.recordEvent("tool.timeout", {
             threadId: call.threadId,
             turnId: call.turnId,
             toolCallId: call.callId,
             name: call.tool,
-            timeoutMs: CODEX_DYNAMIC_TOOL_TIMEOUT_MS,
+            timeoutMs,
           });
         },
       });
@@ -1028,7 +1030,7 @@ async function handleDynamicToolCallWithTimeout(params: {
     resolveAbort = resolve;
   });
   const timeoutPromise = new Promise<CodexDynamicToolCallResponse>((resolve) => {
-    const timeoutMs = Math.max(1, Math.min(CODEX_DYNAMIC_TOOL_TIMEOUT_MS, params.timeoutMs));
+    const timeoutMs = normalizeCodexDynamicToolTimeoutMs(params.timeoutMs);
     timeout = setTimeout(() => {
       timedOut = true;
       const message = `OpenClaw dynamic tool call timed out after ${timeoutMs}ms.`;
@@ -1068,6 +1070,28 @@ async function handleDynamicToolCallWithTimeout(params: {
       controller.abort(new Error("OpenClaw dynamic tool call finished."));
     }
   }
+}
+
+function resolveCodexDynamicToolTimeoutMs(call: CodexDynamicToolCallParams): number {
+  const explicitTimeoutMs = readExplicitCodexDynamicToolTimeoutMs(call);
+  return normalizeCodexDynamicToolTimeoutMs(explicitTimeoutMs ?? CODEX_DYNAMIC_TOOL_TIMEOUT_MS);
+}
+
+function readExplicitCodexDynamicToolTimeoutMs(
+  call: Pick<CodexDynamicToolCallParams, "arguments">,
+): number | undefined {
+  const args = call.arguments;
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const timeoutMs = (args as { timeoutMs?: unknown }).timeoutMs;
+  return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : undefined;
+}
+
+function normalizeCodexDynamicToolTimeoutMs(timeoutMs: number): number {
+  return Math.max(1, Math.min(CODEX_DYNAMIC_TOOL_MAX_TIMEOUT_MS, Math.floor(timeoutMs)));
 }
 
 function failedDynamicToolResponse(message: string): CodexDynamicToolCallResponse {
@@ -1405,10 +1429,12 @@ function handleApprovalRequest(params: {
 
 export const __testing = {
   CODEX_DYNAMIC_TOOL_TIMEOUT_MS,
+  CODEX_DYNAMIC_TOOL_MAX_TIMEOUT_MS,
   CODEX_TURN_COMPLETION_IDLE_TIMEOUT_MS,
   buildCodexNativeHookRelayId,
   filterToolsForVisionInputs,
   handleDynamicToolCallWithTimeout,
+  resolveCodexDynamicToolTimeoutMs,
   ...createCodexAppServerClientFactoryTestHooks((factory) => {
     clientFactory = factory;
   }),

@@ -26,6 +26,7 @@ import { MIN_CODEX_APP_SERVER_VERSION } from "./version.js";
 export { MIN_CODEX_APP_SERVER_VERSION } from "./version.js";
 const CODEX_APP_SERVER_PARSE_LOG_MAX = 500;
 const CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS = 30_000;
+const CODEX_DYNAMIC_TOOL_SERVER_REQUEST_MAX_TIMEOUT_MS = 300_000;
 
 type PendingRequest = {
   method: string;
@@ -337,7 +338,8 @@ export class CodexAppServerClient {
   private async runServerRequestHandlers(
     request: Required<Pick<RpcRequest, "id" | "method">> & { params?: JsonValue },
   ): Promise<JsonValue | undefined> {
-    const timeoutResponse = timeoutServerRequestResponse(request);
+    const timeoutMs = resolveServerRequestTimeoutMs(request);
+    const timeoutResponse = timeoutServerRequestResponse(request, timeoutMs);
     if (!timeoutResponse) {
       return await this.runServerRequestHandlersWithoutTimeout(request);
     }
@@ -351,10 +353,10 @@ export class CodexAppServerClient {
             embeddedAgentLog.warn("codex app-server server request timed out", {
               id: request.id,
               method: request.method,
-              timeoutMs: CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS,
+              timeoutMs,
             });
             resolve(timeoutResponse);
-          }, CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS);
+          }, timeoutMs);
           timeout.unref?.();
         }),
       ]);
@@ -457,6 +459,7 @@ export function defaultServerRequestResponse(
 
 function timeoutServerRequestResponse(
   request: Required<Pick<RpcRequest, "id" | "method">> & { params?: JsonValue },
+  timeoutMs: number,
 ): JsonValue | undefined {
   if (request.method !== "item/tool/call") {
     return undefined;
@@ -465,11 +468,44 @@ function timeoutServerRequestResponse(
     contentItems: [
       {
         type: "inputText",
-        text: `OpenClaw dynamic tool call timed out after ${CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS}ms before sending a response to Codex.`,
+        text: `OpenClaw dynamic tool call timed out after ${timeoutMs}ms before sending a response to Codex.`,
       },
     ],
     success: false,
   };
+}
+
+function resolveServerRequestTimeoutMs(
+  request: Required<Pick<RpcRequest, "method">> & { params?: JsonValue },
+): number {
+  const explicitTimeoutMs =
+    request.method === "item/tool/call"
+      ? readExplicitDynamicToolTimeoutMs(request.params)
+      : undefined;
+  return normalizeServerRequestTimeoutMs(
+    explicitTimeoutMs ?? CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS,
+  );
+}
+
+function readExplicitDynamicToolTimeoutMs(params: JsonValue | undefined): number | undefined {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return undefined;
+  }
+  const args = (params as { arguments?: unknown }).arguments;
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return undefined;
+  }
+  const timeoutMs = (args as { timeoutMs?: unknown }).timeoutMs;
+  return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : undefined;
+}
+
+function normalizeServerRequestTimeoutMs(timeoutMs: number): number {
+  return Math.max(
+    1,
+    Math.min(CODEX_DYNAMIC_TOOL_SERVER_REQUEST_MAX_TIMEOUT_MS, Math.floor(timeoutMs)),
+  );
 }
 
 function assertSupportedCodexAppServerVersion(response: CodexInitializeResponse): void {
@@ -571,5 +607,7 @@ export const __testing = {
   closeCodexAppServerTransport,
   closeCodexAppServerTransportAndWait,
   CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS,
+  CODEX_DYNAMIC_TOOL_SERVER_REQUEST_MAX_TIMEOUT_MS,
+  resolveServerRequestTimeoutMs,
   redactCodexAppServerLinePreview,
 } as const;
