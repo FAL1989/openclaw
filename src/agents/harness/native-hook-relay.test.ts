@@ -84,6 +84,36 @@ describe("native hook relay registry", () => {
     });
   });
 
+  it("stores relay registrations and bridges in process-global state", async () => {
+    const relay = registerNativeHookRelay({
+      provider: "codex",
+      sessionId: "session-1",
+      runId: "run-1",
+      allowedEvents: ["pre_tool_use"],
+    });
+
+    await waitForNativeHookRelayBridgeRecord(relay.relayId);
+    const state = (
+      globalThis as typeof globalThis & {
+        [key: symbol]:
+          | {
+              relays?: Map<string, unknown>;
+              relayBridges?: Map<string, unknown>;
+            }
+          | undefined;
+      }
+    )[Symbol.for("openclaw.nativeHookRelay.state")];
+
+    expect(state?.relays?.get(relay.relayId)).toMatchObject({
+      provider: "codex",
+      sessionId: "session-1",
+      runId: "run-1",
+    });
+    expect(state?.relayBridges?.get(relay.relayId)).toMatchObject({
+      relayId: relay.relayId,
+    });
+  });
+
   it("exposes registered relays through the direct hook bridge", async () => {
     const relay = registerNativeHookRelay({
       provider: "codex",
