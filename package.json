@@ -1,6 +1,6 @@
 {
   "name": "openclaw",
-  "version": "2026.4.27",
+  "version": "2026.4.29",
   "description": "Multi-channel AI gateway with extensible messaging integrations",
   "keywords": [],
   "homepage": "https://github.com/openclaw/openclaw#readme",
@@ -1234,6 +1234,10 @@
       "types": "./dist/plugin-sdk/web-media.d.ts",
       "default": "./dist/plugin-sdk/web-media.js"
     },
+    "./plugin-sdk/zalouser": {
+      "types": "./dist/plugin-sdk/zalouser.d.ts",
+      "default": "./dist/plugin-sdk/zalouser.js"
+    },
     "./plugin-sdk/zod": {
       "types": "./dist/plugin-sdk/zod.d.ts",
       "default": "./dist/plugin-sdk/zod.js"
@@ -1755,6 +1759,7 @@
         "markdown-it",
         "openai",
         "semver",
+        "sqlite-vec",
         "tar",
         "tslog",
         "typebox",

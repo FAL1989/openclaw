@@ -29,9 +29,10 @@ entries = plugins.get("entries")
 if isinstance(entries, dict):
     entries.pop("feishu", None)
     entries.pop("whatsapp", None)
+    entries.pop("openai", None)
 allow = plugins.get("allow")
 if isinstance(allow, list):
-    plugins["allow"] = [item for item in allow if item not in {"feishu", "whatsapp"}]
+    plugins["allow"] = [item for item in allow if item not in {"feishu", "whatsapp", "openai"}]
 path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 }
@@ -39,12 +40,34 @@ stop_openclaw_gateway_processes() {
   OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 /opt/homebrew/bin/openclaw gateway stop || true
   pkill -f 'openclaw.*gateway' >/dev/null 2>&1 || true
 }
+start_openclaw_gateway() {
+  if /opt/homebrew/bin/openclaw gateway restart; then
+    return
+  fi
+  pkill -f 'openclaw.*gateway' >/dev/null 2>&1 || true
+  rm -f /tmp/openclaw-parallels-macos-gateway.log
+  nohup env OPENCLAW_HOME="$HOME" OPENCLAW_STATE_DIR="$HOME/.openclaw" OPENCLAW_CONFIG_PATH="$HOME/.openclaw/openclaw.json" ${input.auth.apiKeyEnv}=${shellQuote(
+    input.auth.apiKeyValue,
+  )} /opt/homebrew/bin/openclaw gateway run --bind loopback --port 18789 --force >/tmp/openclaw-parallels-macos-gateway.log 2>&1 </dev/null &
+}
+wait_for_gateway() {
+  deadline=$((SECONDS + 240))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if /opt/homebrew/bin/openclaw gateway status --deep --require-rpc --timeout 15000; then
+      return
+    fi
+    sleep 2
+  done
+  cat /tmp/openclaw-parallels-macos-gateway.log >&2 || true
+  echo "gateway did not become ready after update" >&2
+  exit 1
+}
 scrub_future_plugin_entries
 stop_openclaw_gateway_processes
 OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 /opt/homebrew/bin/openclaw update --tag ${shellQuote(input.updateTarget)} --yes --json
 ${posixVersionCheck("/opt/homebrew/bin/openclaw", input.expectedNeedle)}
-/opt/homebrew/bin/openclaw gateway restart
-/opt/homebrew/bin/openclaw gateway status --deep --require-rpc
+start_openclaw_gateway
+wait_for_gateway
 /opt/homebrew/bin/openclaw models set ${shellQuote(input.auth.modelId)}
 /opt/homebrew/bin/openclaw config set agents.defaults.skipBootstrap true --strict-json
 ${posixAgentWorkspaceScript("Parallels npm update smoke test assistant.")}
@@ -63,13 +86,13 @@ function Remove-FuturePluginEntries {
   if (-not ($plugins -is [hashtable])) { return }
   $entries = $plugins['entries']
   if ($entries -is [hashtable]) {
-    foreach ($pluginId in @('feishu', 'whatsapp')) {
+    foreach ($pluginId in @('feishu', 'whatsapp', 'openai')) {
       if ($entries.ContainsKey($pluginId)) { $entries.Remove($pluginId) }
     }
   }
   $allow = $plugins['allow']
   if ($allow -is [array]) {
-    $plugins['allow'] = @($allow | Where-Object { $_ -notin @('feishu', 'whatsapp') })
+    $plugins['allow'] = @($allow | Where-Object { $_ -notin @('feishu', 'whatsapp', 'openai') })
   }
   $config | ConvertTo-Json -Depth 100 | Set-Content -Path $configPath -Encoding UTF8
 }
@@ -83,12 +106,32 @@ Remove-FuturePluginEntries
 Stop-OpenClawGatewayProcesses
 $env:OPENCLAW_DISABLE_BUNDLED_PLUGINS = '1'
 Invoke-OpenClaw update --tag ${psSingleQuote(input.updateTarget)} --yes --json
-if ($LASTEXITCODE -ne 0) { throw "openclaw update failed with exit code $LASTEXITCODE" }
+$updateExit = $LASTEXITCODE
+if ($updateExit -ne 0) {
+  "openclaw update exited with code $updateExit; verifying installed version before failing" | Out-Host
+}
 $version = Invoke-OpenClaw --version
 $version
 ${windowsVersionCheck(input.expectedNeedle)}
-Invoke-OpenClaw gateway restart
-Invoke-OpenClaw gateway status --deep --require-rpc
+function Wait-OpenClawGateway {
+  $deadline = (Get-Date).AddSeconds(180)
+  $attempt = 0
+  while ((Get-Date) -lt $deadline) {
+    Invoke-OpenClaw gateway status --deep --require-rpc --timeout 15000
+    if ($LASTEXITCODE -eq 0) { return }
+    $attempt += 1
+    if ($attempt -eq 4) {
+      Invoke-OpenClaw gateway start *>&1 | Out-Host
+    }
+    Start-Sleep -Seconds 5
+  }
+  throw "gateway did not become ready after update"
+}
+Invoke-OpenClaw gateway restart *>&1 | Out-Host
+if ($LASTEXITCODE -ne 0) {
+  "gateway restart exited with code $LASTEXITCODE; probing readiness before failing" | Out-Host
+}
+Wait-OpenClawGateway
 Invoke-OpenClaw models set ${psSingleQuote(input.auth.modelId)}
 Invoke-OpenClaw config set agents.defaults.skipBootstrap true --strict-json
 ${windowsAgentWorkspaceScript("Parallels npm update smoke test assistant.")}
@@ -111,9 +154,10 @@ if (!plugins || typeof plugins !== "object") process.exit(0);
 if (plugins.entries && typeof plugins.entries === "object") {
   delete plugins.entries.feishu;
   delete plugins.entries.whatsapp;
+  delete plugins.entries.openai;
 }
 if (Array.isArray(plugins.allow)) {
-  plugins.allow = plugins.allow.filter((id) => id !== "feishu" && id !== "whatsapp");
+  plugins.allow = plugins.allow.filter((id) => id !== "feishu" && id !== "whatsapp" && id !== "openai");
 }
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
 JS
@@ -122,12 +166,33 @@ stop_openclaw_gateway_processes() {
   OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 openclaw gateway stop || true
   pkill -f 'openclaw.*gateway' >/dev/null 2>&1 || true
 }
+start_openclaw_gateway() {
+  pkill -f "openclaw gateway run" >/dev/null 2>&1 || true
+  rm -f /tmp/openclaw-parallels-linux-gateway.log
+  setsid sh -lc ${shellQuote(
+    `exec env OPENCLAW_HOME=/root OPENCLAW_STATE_DIR=/root/.openclaw OPENCLAW_CONFIG_PATH=/root/.openclaw/openclaw.json OPENCLAW_DISABLE_BONJOUR=1 ${input.auth.apiKeyEnv}=${shellQuote(
+      input.auth.apiKeyValue,
+    )} openclaw gateway run --bind loopback --port 18789 --force >/tmp/openclaw-parallels-linux-gateway.log 2>&1`,
+  )} >/dev/null 2>&1 < /dev/null &
+}
+wait_for_gateway() {
+  deadline=$((SECONDS + 240))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if openclaw gateway status --deep --require-rpc --timeout 15000; then
+      return
+    fi
+    sleep 2
+  done
+  cat /tmp/openclaw-parallels-linux-gateway.log >&2 || true
+  echo "gateway did not become ready after update" >&2
+  exit 1
+}
 scrub_future_plugin_entries
 stop_openclaw_gateway_processes
 OPENCLAW_DISABLE_BUNDLED_PLUGINS=1 openclaw update --tag ${shellQuote(input.updateTarget)} --yes --json
 ${posixVersionCheck("openclaw", input.expectedNeedle)}
-openclaw gateway restart
-openclaw gateway status --deep --require-rpc
+start_openclaw_gateway
+wait_for_gateway
 openclaw models set ${shellQuote(input.auth.modelId)}
 openclaw config set agents.defaults.skipBootstrap true --strict-json
 ${posixAgentWorkspaceScript("Parallels npm update smoke test assistant.")}
