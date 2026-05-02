@@ -150,6 +150,39 @@ describe("Client.deployCommands", () => {
     expect(deleteRequest).not.toHaveBeenCalled();
   });
 
+  it("does not patch Discord-returned default command fields", async () => {
+    const client = createInternalTestClient([createTestCommand({ name: "one" })]);
+    const get = vi.fn(async () => [
+      {
+        id: "cmd1",
+        application_id: "app1",
+        version: "v1",
+        type: ApplicationCommandType.ChatInput,
+        name: "one",
+        name_localizations: null,
+        name_localized: "one",
+        description: "one command",
+        description_localizations: null,
+        description_localized: "one command",
+        options: [],
+        default_member_permissions: null,
+        dm_permission: true,
+        integration_types: [0, 1],
+        contexts: [0, 1, 2],
+      },
+    ]);
+    const patch = vi.fn(async () => undefined);
+    const post = vi.fn(async () => undefined);
+    const deleteRequest = vi.fn(async () => undefined);
+    attachRestMock(client, { get, patch, post, delete: deleteRequest });
+
+    await client.deployCommands({ mode: "reconcile" });
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+    expect(deleteRequest).not.toHaveBeenCalled();
+  });
+
   it("skips command deploy when the serialized command set is unchanged", async () => {
     const client = createInternalTestClient([createTestCommand({ name: "one" })]);
     const get = vi.fn(async () => []);

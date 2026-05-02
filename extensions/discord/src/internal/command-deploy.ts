@@ -162,11 +162,28 @@ function comparableCommand(value: unknown): unknown {
     "guild_id",
     "version",
     "default_permission",
+    "dm_permission",
     "nsfw",
+    "name_localized",
+    "description_localized",
   ]);
   return stableComparableObject(
     Object.fromEntries(
-      Object.entries(value).filter(([key, entry]) => !omit.has(key) && entry !== undefined),
+      Object.entries(value).filter(([key, entry]) => {
+        if (omit.has(key) || entry === undefined) {
+          return false;
+        }
+        if (
+          (key === "name_localizations" || key === "description_localizations") &&
+          entry === null
+        ) {
+          return false;
+        }
+        if (key === "options" && Array.isArray(entry) && entry.length === 0) {
+          return false;
+        }
+        return true;
+      }),
     ),
   );
 }

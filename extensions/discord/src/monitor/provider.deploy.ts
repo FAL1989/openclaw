@@ -11,6 +11,18 @@ import { logDiscordStartupPhase } from "./provider.startup-log.js";
 
 const DISCORD_DEPLOY_REJECTED_ENTRY_LIMIT = 3;
 
+let discordCommandDeployQueue: Promise<void> = Promise.resolve();
+
+async function enqueueDiscordCommandDeploy<T>(run: () => Promise<T>): Promise<T> {
+  const previous = discordCommandDeployQueue.catch(() => undefined);
+  const next = previous.then(run);
+  discordCommandDeployQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return await next;
+}
+
 type DiscordDeployErrorLike = {
   status?: unknown;
   discordCode?: unknown;
@@ -180,9 +192,17 @@ function wrapDeployRestMethod(params: {
     } catch (err) {
       attachDiscordDeployRequestBody(err, body);
       const details = formatDiscordDeployErrorDetails(err);
-      params.runtime.error?.(
-        `discord startup [${params.accountId}] native-slash-command-deploy-rest:${params.method}:error ${Math.max(0, Date.now() - params.startupStartedAt)}ms path=${path} requestMs=${Date.now() - startedAt} error=${formatErrorMessage(err)}${details}`,
-      );
+      if (err instanceof RateLimitError) {
+        if (params.shouldLogVerbose()) {
+          params.runtime.log?.(
+            `discord startup [${params.accountId}] native-slash-command-deploy-rest:${params.method}:rate-limit ${Math.max(0, Date.now() - params.startupStartedAt)}ms path=${path} requestMs=${Date.now() - startedAt} retryAfterMs=${Math.max(0, Math.ceil(err.retryAfter * 1000))} scope=${err.scope ?? "unknown"} code=${err.discordCode ?? "unknown"}${details}`,
+          );
+        }
+      } else {
+        params.runtime.error?.(
+          `discord startup [${params.accountId}] native-slash-command-deploy-rest:${params.method}:error ${Math.max(0, Date.now() - params.startupStartedAt)}ms path=${path} requestMs=${Date.now() - startedAt} error=${formatErrorMessage(err)}${details}`,
+        );
+      }
       throw err;
     }
   };
@@ -232,10 +252,21 @@ export async function deployDiscordCommands(params: {
   if (!params.enabled) {
     return;
   }
+  return await enqueueDiscordCommandDeploy(async () => await deployDiscordCommandsNow(params));
+}
+
+async function deployDiscordCommandsNow(params: {
+  client: Client;
+  runtime: RuntimeEnv;
+  enabled: boolean;
+  accountId?: string;
+  startupStartedAt?: number;
+  shouldLogVerbose: () => boolean;
+}) {
   const startupStartedAt = params.startupStartedAt ?? Date.now();
   const accountId = params.accountId ?? "default";
-  const maxAttempts = 3;
-  const maxRetryDelayMs = 15_000;
+  const maxAttempts = 8;
+  const maxRetryDelayMs = 60_000;
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
   const isDailyCreateLimit = (err: unknown) =>
     err instanceof RateLimitError &&
