@@ -6,7 +6,7 @@ metadata:
     "openclaw":
       {
         "emoji": "📊",
-        "os": ["darwin"],
+        "os": ["darwin", "linux"],
         "requires": { "bins": ["codexbar"] },
         "install":
           [
